@@ -1,0 +1,14 @@
+
+/0_Data
+**/ckpt/
+**/on_epoch_begin
+
+**/on_train_begin
+**/on_train_end
+
+/C_pred/*
+!/C_pred/lib/
+!/C_pred/*.ipynb*
+
+*.zip
+*.ipynb_checkpoints
