@@ -1,0 +1,656 @@
+import cv2
+import numpy as np
+import os
+import pandas as pd
+import numpy
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill,Font
+import pptx
+from pptx.util import Inches,Pt
+from pptx import Presentation
+import time
+import shutil  #--------------------------new20221108-yita---------------- 
+# from lib.json_name import Jsonname  #---------new2023 charley---------------- 
+
+"""
+Create AI model predicted images report, content record IoU, misjudgment and omission information.
+Notice: If image resolution is higher, the running time will be longer.
+"""
+
+class CreateAccuracyReport(object):
+    """
+    Inputs-
+    trueLabelFolderPath: The folder path of transformed label data(ground truth, type is .png).
+    predRootFolderPath: The root folder path of all prediction image folder(name format should be pred-xx, xx is number of model training epoch).
+    reportTitleName: The title name used for Excel file name.
+    colorDict: A dictionary that KEY is the number corresponding to the category, VALUE is the BGR list corresponding to the category.
+    """
+    # def __init__(self, trueLabelFolderPath, predRootFolderPath, reportTitleName, colorDict):
+    def __init__(self, trueLabelFolderPath, predRootFolderPath, reportTitleName, config, jsonFile):#--new20220810-yita
+        self.trueLabelFolderPath = trueLabelFolderPath
+        self.predRootFolderPath = predRootFolderPath
+        self.reportTitleName = reportTitleName        
+        self.JasonPath = jsonFile
+        
+    #--------------------------new20220810-yita----------------  
+        self.config=config
+        self.sequence = list(map(lambda x: chr(x), range(ord('A'), ord('Z') + 1)))
+        colorDict = {} # 格式為字典, KEY為類別對應到模型上的數值, VALUE為BGR顏色的清單(e.g [B, G, R])
+        colorDict[0] = [0,0,0]
+        for idx, color in enumerate(config["color_list"]):
+            colorDict[idx+1] = color
+        # print(color_dict)   
+
+        detect_label_dict= {}
+        detect_label_dict[0] = "Background"
+        for idx, detect_label_list in enumerate(config["detect_label_list"]):
+            detect_label_dict[idx+1] = detect_label_list
+        # print(detect_label_dict)
+        self.detect_label_dict=detect_label_dict
+    #--------------------------new20220810-yita---------------- 
+        self.test_folder_list=config["test_folder_list"]   #1110926 charley test data
+        self.compare_img_folder_path1=config["save_compare_img_folder_path"]
+        self.colorDict = colorDict
+        # print(self.colorDict)
+        # self.numClass = len(colorDict)
+        self.numClass = config["num_classes"]-1
+        # print(self.numClass)
+        self.predRootFolderList = os.listdir(self.predRootFolderPath)
+        # print(self.predRootFolderList)
+        self.predRootFolderListNEW=[]
+        for i in self.predRootFolderList:
+            try:
+                if i.split('.')[1]=='xlsx' or i.split('.')[1]=='pptx' or i.split('.')[1]=='ipynb_checkpoints'or i.split('.')[1]=='json' or i.split('.')[2]=='h5'or i.split('.')[3]=='xlsx#' :
+                    print('Delete_list_name:'+i)   #20230505-yita-增加排除項目 json h5 xlsx#---------------
+                else :
+                    self.predRootFolderListNEW.append(i)
+            except:
+                self.predRootFolderListNEW.append(i)
+        # print(self.predRootFolderListNEW)
+        self.predRootFolderList=self.predRootFolderListNEW
+        print(self.predRootFolderList)
+        self.epochList = [folderName.split('-')[1] for folderName in self.predRootFolderList if '.ipynb_checkpoints' not in folderName]
+        self.saveNameList = [self.reportTitleName + '-' + epoch + '.xlsx' for epoch in self.epochList]
+
+        self.setColumnNames()#--new20220810-yita
+        
+        self.createDataframe()
+        
+        self.run()
+    #--------------------------new20220810-yita----------------    
+    # 
+    def RGBToHex(self,r, g, b):
+        return '#%02X%02X%02X' % (r, g, b)
+
+    def blackwhite(self,my_hex):
+        """Returns complementary RGB color
+
+        Example:
+        >>>complementaryColor('FFFFFF')
+        '000000'
+        """
+        # if my_hex[0] == '#':
+        #     my_hex = my_hex[1:]
+        # rgb = (my_hex[0:2], my_hex[2:4], my_hex[4:6])
+        # comp = ['%02X' % (255 - int(a, 16)) for a in rgb]
+        # return ''.join(comp)
+        
+        #有個文字的顏色#797979~我強制轉換回黑色  1110914
+        #避免頻色及文字相同  1110914
+        if my_hex[0] == '#':
+            my_hex = my_hex[1:]
+        rgb = (my_hex[0:2], my_hex[2:4], my_hex[4:6])
+        comp = ['%02X' % (255 - int(a, 16)) for a in rgb]
+        if str(rgb)=="('79', '79', '79')":
+            comp=['00', '00', '00']
+        print(str(rgb)+":"+str(comp))        
+        return ''.join(comp)
+
+    def correct_label_color(self,saveExcelPath):    
+    #依原始 的名稱定義的資料: dfSummary
+        correct_label_color_dict= {}
+        correct_label_color_dict[0] = "Background",[0,0,0]
+        detect_label_list=self.config["detect_label_list"]
+        # print(detect_label_list[0])
+        # list_num=0
+        color_list = self.config["color_list"]
+        for idx, correct_label_name in enumerate(self.config["correct_label"]):
+            correct_label_color_dict[idx+1] = correct_label_name,color_list[idx]
+        # for idx, color in enumerate(self.config["color_list"]):
+        #     name=detect_label_list[list_num]
+        #     correct_label_color_dict[idx+1] =name, color
+        #     list_num+=1
+
+        wb = load_workbook(saveExcelPath) #開啟活頁簿
+        # ws = wb.active
+        ws = wb.get_sheet_by_name(u"Summary")
+        # ws1.sheet_properties.tabColor = "1072BA"  # 设置 sheet 标签背景色
+        x,y=self.dfSummary.shape
+        OtherData0 = ['']
+
+        for i in range(y-numpy.size(OtherData0)):
+            OtherData0.append('') 
+        ws.append(OtherData0)
+
+
+        OtherData2 = ['色彩名稱表','HEX','B','G','R','Color']
+        # print(self.dfSummary.shape)
+        OtherData2NameLength=numpy.size(OtherData2)
+        for i in range(y-numpy.size(OtherData2)):
+            OtherData2.append('') 
+        ws.append((OtherData2))
+        
+        r=x+2+2
+        for i in range(1,OtherData2NameLength+1):           
+            row = ws.cell(r-1, i) 
+            row.fill = PatternFill("solid", start_color="FFFF00")
+
+        for num, key in correct_label_color_dict.items():    
+            ws.cell(r, 1).value = key[0]
+            ws.cell(r, 2).value = self.RGBToHex(key[1][2],key[1][1],key[1][0])
+            ws.cell(r, 3).value = key[1][0]
+            ws.cell(r, 4).value = key[1][1]
+            ws.cell(r, 5).value = key[1][2]        
+            ws.cell(r, 6).value = key[0]
+            ws.cell(r, 6).font =  Font(color=self.blackwhite(ws.cell(r, 2).value))
+            ws.cell(r, 6).fill = PatternFill(start_color=self.RGBToHex(key[1][2],key[1][1],key[1][0]).replace('#', ''), fill_type="solid") #used hex code for red color
+            r=r+1
+        wb.save(saveExcelPath)           #存檔
+        wb.close()  # close the workbook
+
+    #     
+    def SummaryNames(self,rowCount,file):
+        # rowCount = 0
+        colsCount= 1
+        fileName = os.path.splitext(file)[0]
+        excelalgo = [fileName]
+        # print("self.numClass:"+str(self.numClass))
+        # Count_Details!B2   self.initial_count
+
+        for i in range(self.numClass+1):
+            # excelalgofu='=IF(IoU_Details!'+self.ten2TwentySix(colsCount)+str(rowCount+2)+'>0.5, 1, IF(IoU_Details!'+self.ten2TwentySix(colsCount)+str(rowCount+2)+'="", 1, 0))'
+            # excelalgofu='=IF(IoU_Details!'+self.ten2TwentySix(colsCount)+str(rowCount+2)+'> Count_Details!B'+str(self.initial_count+4) +', 1, IF(IoU_Details!'+self.ten2TwentySix(colsCount)+str(rowCount+2)+'="", 1, 0))'
+            excelalgofu='=IF(IoU_Details!'+self.ten2TwentySix(colsCount)+str(rowCount+2)+'> $B$'+str(self.initial_count+16) +', 1, IF(IoU_Details!'+self.ten2TwentySix(colsCount)+str(rowCount+2)+'="", 1, 0))'
+            excelalgo.append(excelalgofu)# 20230505-yita-新增說明        $B$n+16 這個儲存格是 IOU的預設位置  文中變數名為 OtherData0_add16 
+            colsCount+=1
+     
+        return excelalgo
+
+
+
+
+    def SummaryOtherData(self,rowCount):
+        cwd = os.getcwd()
+        Data_total = cwd.split('\C_pred')[0]
+        # print(Data_total)
+        # Data_total_excel=Data_total+'\A_Data_preprocessing\Dentistry_ClassInformation.xlsx'
+        # Data_total_excel=Data_total+'\A_Data_preprocessing\Dentistry_ClassInformation.xlsx'
+        Data_total_excel=self.config["Data_total_excel"]
+        # self.predRootFolderPath
+        workbook = load_workbook(Data_total_excel)
+        # 獲取表單
+        sheet = workbook[u'Summary']
+        # 讀取指定的單元格資料
+        rows = sheet.rows
+        read_test_data_FINISHED='false'
+        for row in list(rows):  # 遍歷每行資料
+            if read_test_data_FINISHED=='true':
+                break
+            case = []   # 用於存放一行資料
+            for c in row:  # 把每行的每個單元格的值取出來，存放到case裡
+                case.append(c.value)
+            # print(case)
+            length0 = len(self.test_folder_list)
+            for j in range(length0):
+                print(self.test_folder_list[j])
+                testvalue=self.test_folder_list[j]#抓出陣列內容的值抓測試檔名稱
+            #print(self.test_folder_list)
+            length = len(case)
+            for i in range(length):#目的在檢查是否與測試檔名稱相同
+                print(case[i])
+                if case[i]==testvalue: #'Dentistry_0002' #如果有找到相同的測試檔名稱
+                    read_test_data_FINISHED='true'
+            # case#這是最後一行
+            print("顯示測試內容全部的統計值")
+            print(case)
+        # case#這是最後一行
+
+        x,y=self.dfSummary.shape
+
+        OtherData0_add2 = ['Label'] 
+        print(OtherData0_add2)#1110926
+        for i in range(y-numpy.size(OtherData0_add2)):
+            OtherData0_add2fu='=('+self.ten2TwentySix(i+1)+str(1)+')'
+            OtherData0_add2.append(OtherData0_add2fu) 
+        # print(numpy.size(OtherData))
+        self.dfSummary.loc[rowCount] = OtherData0_add2
+        rowCount+=1
+
+
+
+        ### 20230505-yita-以下修正需顯示之項目的計算方式    FP TP FN TN 相關統計需查看之數據    OtherData0_add16  add16 表示數據結束後向下16儲存格的內容    ###
+        OtherData0_add3 = ['整體準確率Accuracy表現平均值']
+        for i in range(y-numpy.size(OtherData0_add3)):
+            OtherData0_add3fu='=AVERAGE('+self.ten2TwentySix(i+1)+str(2)+':'+self.ten2TwentySix(i+1)+str(x+1)+')'
+            OtherData0_add3.append(OtherData0_add3fu) 
+        # print(numpy.size(OtherData))
+        self.dfSummary.loc[rowCount] = OtherData0_add3
+        rowCount+=1
+
+        OtherData0_add4 = ['個別IOU準確率表現平均值']
+        for i in range(y-numpy.size(OtherData0_add4)):
+
+            OtherData0_add4fu='=IFERROR(AVERAGE(Count_Details!'+self.ten2TwentySix(i+1)+str(2)+':' +self.ten2TwentySix(i+1)+str(x+1)+'),"無參考價值或AI完全無法學習成效")'
+            OtherData0_add4.append(OtherData0_add4fu) 
+        # print(numpy.size(OtherData))
+        self.dfSummary.loc[rowCount] = OtherData0_add4
+        rowCount+=1
+
+        OtherData0_add5 = ['','個別判定總數(TP+FN)']
+        print(OtherData0_add5)#1110926
+        for num in range(y-numpy.size(OtherData0_add5)):
+            if num==0:
+                OtherData0_add5.append(case[y-1])
+            # elif num == 1:
+            #     OtherData0_add5.append(case[y-1])
+            else:
+                OtherData0_add5.append(case[num])
+        self.dfSummary.loc[rowCount] = OtherData0_add5
+        print(OtherData0_add5) #1110926
+        rowCount+=1
+
+        OtherData0_add6 = ['','漏判數']
+        for i in range(y-numpy.size(OtherData0_add6)):
+            OtherData0_add6fu='=COUNTIF(Count_Details!'+self.ten2TwentySix(i+2)+str(2)+':' +self.ten2TwentySix(i+2)+str(x+1)+', "Miss")'
+            OtherData0_add6.append(OtherData0_add6fu) 
+        self.dfSummary.loc[rowCount] = OtherData0_add6
+        rowCount+=1
+
+        OtherData0_add7 = ['','誤判數(FP)']
+        for i in range(y-numpy.size(OtherData0_add7)):
+            OtherData0_add7fu='=COUNTIF(Count_Details!'+self.ten2TwentySix(i+2)+str(2)+':' +self.ten2TwentySix(i+2)+str(x+1)+', "Misjudgment")'
+            OtherData0_add7.append(OtherData0_add7fu) 
+        self.dfSummary.loc[rowCount] = OtherData0_add7
+        rowCount+=1
+        
+        OtherData0_add8 = ['','真陰性(TN)']
+        for i in range(y-numpy.size(OtherData0_add8)):
+            OtherData0_add8fu='='+str(x)+'-'+self.ten2TwentySix(i+2)+str(x+5)+'-'+self.ten2TwentySix(i+2)+str(x+7)
+            OtherData0_add8.append(OtherData0_add8fu) 
+        self.dfSummary.loc[rowCount] = OtherData0_add8
+        rowCount+=1
+        
+        OtherData0_add9 = ['','真陽性(TP)']
+        for i in range(y-numpy.size(OtherData0_add9)):
+            OtherData0_add9fu='='+str(x)+'*'+self.ten2TwentySix(i+2)+str(x+3)+'-'+self.ten2TwentySix(i+2)+str(x+8)
+            OtherData0_add9.append(OtherData0_add9fu) 
+        self.dfSummary.loc[rowCount] = OtherData0_add9
+        rowCount+=1    
+        
+        OtherData0_add10 = ['','偽陰性MISS(FN)']
+        for i in range(y-numpy.size(OtherData0_add10)):
+            OtherData0_add10fu='='+self.ten2TwentySix(i+2)+str(x+5)+'-'+self.ten2TwentySix(i+2)+str(x+9)
+            OtherData0_add10.append(OtherData0_add10fu) 
+        self.dfSummary.loc[rowCount] = OtherData0_add10
+        rowCount+=1         
+        
+        OtherData0_add11 = ['','靈敏度(Sensitivity(True Postive Rate, TPR))TP/(TP+FN)']
+        for i in range(y-numpy.size(OtherData0_add11)):
+#             OtherData0_add11fu='='+self.ten2TwentySix(i+2)+str(x+9)+'/('+self.ten2TwentySix(i+2)+str(x+9)+'+'+ self.ten2TwentySix(i+2)+str(x+10)+')'
+            OtherData0_add11fu='=IF('+self.ten2TwentySix(i+2)+str(x+5)+'<'+str(x/10)+',"無參考價值或AI完全無法學習成效",' +self.ten2TwentySix(i+2)+str(x+9)+'/('+self.ten2TwentySix(i+2)+str(x+9)+'+'+ self.ten2TwentySix(i+2)+str(x+10)+'))'
+            OtherData0_add11.append(OtherData0_add11fu) 
+        self.dfSummary.loc[rowCount] = OtherData0_add11
+        rowCount+=1         
+        
+        OtherData0_add12 = ['','特異度(Specificity)TN/(FP+TN)']
+        for i in range(y-numpy.size(OtherData0_add12)):
+#             OtherData0_add12fu='='+self.ten2TwentySix(i+2)+str(x+8)+'/('+self.ten2TwentySix(i+2)+str(x+7)+'+'+ self.ten2TwentySix(i+2)+str(x+8)+')'
+            # OtherData0_add12fu='=IF('+self.ten2TwentySix(i+2)+str(x+8)+'=0,' +self.ten2TwentySix(i+2)+str(x+8)+'/('+self.ten2TwentySix(i+2)+str(x+7)+'+'+ self.ten2TwentySix(i+2)+str(x+8)+'),"無參考價值或AI完全無法學習成效")'
+            OtherData0_add12fu='=IF('+self.ten2TwentySix(i+2)+str(x+8)+'=0,"無參考價值或AI完全無法學習成效",' +self.ten2TwentySix(i+2)+str(x+8)+'/('+self.ten2TwentySix(i+2)+str(x+7)+'+'+ self.ten2TwentySix(i+2)+str(x+8)+'))'
+            OtherData0_add12.append(OtherData0_add12fu) 
+        self.dfSummary.loc[rowCount] = OtherData0_add12
+        rowCount+=1           
+        
+        
+        OtherData0_add13 = ['','正確率(Precision)TP/(TP+FP)']
+        for i in range(y-numpy.size(OtherData0_add13)):
+#             OtherData0_add13fu='='+self.ten2TwentySix(i+2)+str(x+9)+'/('+self.ten2TwentySix(i+2)+str(x+9)+'+'+ self.ten2TwentySix(i+2)+str(x+7)+')'
+            OtherData0_add13fu='=IF('+self.ten2TwentySix(i+2)+str(x+5)+'<'+str(x/10)+',"無參考價值或AI完全無法學習成效",' +self.ten2TwentySix(i+2)+str(x+9)+'/('+self.ten2TwentySix(i+2)+str(x+9)+'+'+ self.ten2TwentySix(i+2)+str(x+7)+'))'
+            OtherData0_add13.append(OtherData0_add13fu) 
+        self.dfSummary.loc[rowCount] = OtherData0_add13
+        rowCount+=1            
+
+        
+        OtherData0_add14 = ['','ROC空間用偽陽性率(表示特異度(1-Specificity)False Postive Rate, FPR))FP/(FP+TN)']
+        for i in range(y-numpy.size(OtherData0_add14)):
+            OtherData0_add14fu='=IF(OR('+self.ten2TwentySix(i+2)+str(x+8)+'=0,'+self.ten2TwentySix(i+2)+str(x+5)+'<'+str(x/10)+'),"無參考價值或AI完全無法學習成效",' +self.ten2TwentySix(i+2)+str(x+7)+'/('+self.ten2TwentySix(i+2)+str(x+7)+'+'+ self.ten2TwentySix(i+2)+str(x+8)+'))'
+            OtherData0_add14.append(OtherData0_add14fu) 
+        self.dfSummary.loc[rowCount] = OtherData0_add14
+        rowCount+=1
+
+        OtherData0_add15 = ['','F1 score(2*PPV*TPR/(PPV+TPR)=2TP/(2TP+FP+FN))']
+        for i in range(y-numpy.size(OtherData0_add15)):
+            OtherData0_add15fu='=IF(OR('+ self.ten2TwentySix(i+2)+str(x+9)+'=0,'+self.ten2TwentySix(i+2)+str(x+8)+'=0,'+self.ten2TwentySix(i+2)+str(x+5)+'<'+str(x/10) +'),"無參考價值或AI完全無法學習成效",2*' +self.ten2TwentySix(i+2)+str(x+9)+'/(2*'+self.ten2TwentySix(i+2)+str(x+9)+'+'+ self.ten2TwentySix(i+2)+str(x+7)+'+'+ self.ten2TwentySix(i+2)+str(x+10)+'))'
+            OtherData0_add15.append(OtherData0_add15fu) 
+        self.dfSummary.loc[rowCount] = OtherData0_add15
+        rowCount+=1
+
+        OtherData0_add16 = ['IOU設定值', 0.5]
+        for i in range(y-numpy.size(OtherData0_add16)):
+            OtherData0_add16.append('') 
+        self.dfSummary.loc[rowCount] = OtherData0_add16
+
+        ### 20230505-yita-以上修正需顯示之項目的計算方式    FP TP FN TN 相關統計需查看之數據 ###
+
+#         self.dfIoUColNames = ['編號類別對應表', 'ClassName', '', '']
+#         for i in range(self.numClass):
+#             # self.dfIoUColNames.append('IoU ' + str(i))
+#             self.dfIoUColNames.append(self.detect_label_dict[i])
+#         self.dfCountColNames = self.dfIoUColNames.copy()
+#         self.dfIoUColNames.append('Mean IoU')
+    #--------------------------new20220810-yita----------------        
+    def setColumnNames(self):
+        self.dfIoUColNames = ['File name', 'Pixel accuracy']
+        for i in range((self.numClass)):
+            # self.dfIoUColNames.append('IoU ' + str(i))
+            # print((i))
+            # print(self.detect_label_dict[i])
+            self.dfIoUColNames.append(self.detect_label_dict[i])
+        self.dfCountColNames = self.dfIoUColNames.copy()
+        self.dfIoUColNames.append('Mean IoU')
+
+    def createDataframe(self):
+        # self.dfSummary = pd.DataFrame()
+        # print(self.dfCountColNames)
+        self.dfSummary = pd.DataFrame(columns=self.dfCountColNames)
+        self.dfIoU = pd.DataFrame(columns=self.dfIoUColNames)
+        self.dfCount = pd.DataFrame(columns=self.dfCountColNames)
+        
+
+    def readAndTransMask(self, labelPath, predFilePath):
+        labelArray = cv2.imread(labelPath, cv2.IMREAD_GRAYSCALE)
+        height, width = labelArray.shape
+        predImg = cv2.imread(predFilePath)
+        predArray = np.zeros([height, width])
+        for i in np.arange(1, self.numClass):
+            idx = np.where((predImg[:,:,0] == self.colorDict[i][0])
+                       & (predImg[:,:,1] == self.colorDict[i][1])
+                       & (predImg[:,:,2] == self.colorDict[i][2]))
+            predArray[idx] = i
+        return labelArray, predArray
+
+    def index2position(self, idxPairs):
+        rows = idxPairs[0]
+        cols = idxPairs[1]
+        return {(y, x) for (y, x) in zip(rows, cols)}
+
+    def calIoUAndCountList(self, labelArray, predArray):
+        iouList = []
+        countList=[]
+        # SummaryList=[]
+        for i in range(self.numClass):
+            # print(labelIdx)
+            
+            labelIdx = np.where(labelArray==i)
+            # print(labelIdx)
+            predIdx = np.where(predArray==i)
+            if len(labelIdx[0]) == 0 and len(predIdx[0]) == 0:
+                iouList.append(None)
+                countList.append(None)
+            elif len(labelIdx[0]) == 0:
+                iouList.append(0)
+                countList.append('Misjudgment')
+            elif len(predIdx[0]) == 0:
+                iouList.append(0)
+                countList.append('Miss')
+            else:
+                labelPos = self.index2position(labelIdx)
+                predPos = self.index2position(predIdx)
+                union = labelPos.union(predPos)                   #標記區域+AI區域      fn tp fp   fn=labelPos-tp     fp=predPos-tp
+                inter = labelPos.intersection(predPos)            #標記區域&AI區域共有   tp
+
+                iouList.append(len(inter)/len(union))
+                countList.append(len(inter)/len(union))
+            # SummaryList='=IF(IoU_Details!C'+str(rowCount+2)+'>0.5, 1, IF(IoU_Details!C'+str(rowCount+2)+'="", 1, 0))'
+        miou = np.nanmean(np.array(iouList, dtype=np.float64))
+        iouList.append(miou)
+        return iouList, countList
+
+    def calImgAccuracy(self, predFolderPath, file):
+        fileName = os.path.splitext(file)[0]
+        tmpRowIoU = [fileName]
+        tmpRowCount = [fileName]
+        
+        labelPath = os.path.join(self.trueLabelFolderPath, fileName + '.png')
+        predFilePath = os.path.join(predFolderPath, fileName + '_pred.png')
+        labelArray, predArray = self.readAndTransMask(labelPath, predFilePath)
+        addArray = np.add(labelArray, np.multiply(predArray, -1))
+        pixelAccuracy = len(np.where(addArray==0)[0]) / addArray.size        #整張圖預測的總區域的正確性(IOU)
+        iouList, countList = self.calIoUAndCountList(labelArray, predArray)  #個別項目預測的正確性(IOU)
+        
+        tmpRowIoU.append(pixelAccuracy)      #把pixelAccuracy新增一行在tmpRowIoU
+        tmpRowIoU.extend(iouList)            #把iouList接續在tmpRowIoU值的最後面
+        tmpRowCount.append(pixelAccuracy)
+        tmpRowCount.extend(countList)
+        
+        # print(iouList)
+        # print(tmpRowCount)
+        return tmpRowIoU, tmpRowCount
+    
+
+    def ten2TwentySix(self,num):
+        L = []
+        if num > 25:
+            while True:
+                d = int(num / 26)
+                remainder = num % 26
+                if d <= 25:
+                    L.insert(0, self.sequence[remainder])
+                    L.insert(0, self.sequence[d - 1])
+                    break
+                else:
+                    L.insert(0, self.sequence[remainder])
+                    num = d - 1
+        else:
+            L.append(self.sequence[num])
+
+        return "".join(L)
+    # 建立PPT提供快速瀏覽
+    def compare_output_ppt(self,predFolderName,saveExcelPath):
+
+        time.localtime()
+        train_time=time.strftime("%Y-%m-%d", time.localtime())
+        # pred_mask_folder_path=config["save_pred_img_folder_path"]
+        pred_mask_folder_path=predFolderName
+        # 'pred-' + model +'_'+ backbone +'_' +ckptname
+
+        # print(predFolderName)
+        User_name=self.config["user_name"]
+        # print("pred_mask_folder_path:   "+pred_mask_folder_path)
+        savePPtPath=saveExcelPath.split('.xlsx')
+        # print(savePPtPath)
+        ppt_filename=savePPtPath[0]+'.pptx'
+        # print(ppt_filename)
+        # prs = Presentation()
+        #開啟新的簡報物件
+        
+        prs = Presentation()
+        #建立簡報檔第一張頁面物件
+        title_slide_layout = prs.slide_layouts[0] 
+        #增加一張簡報
+        slide = prs.slides.add_slide(title_slide_layout)
+        #設定第一張簡報的標題 
+        title = slide.shapes.title
+        # title.text = 'pred-' + model +'_'+ backbone +'_' +ckptname
+        title.text = pred_mask_folder_path
+        #設定第一張簡報的副標題
+        subtitle = slide.placeholders[1]
+        subtitle.text = "作者： " + User_name +  "   " +train_time
+        #將簡報物件存檔
+        prs.save(ppt_filename)
+        # ppt_filename = 'python_ppt_v1'
+        # full_ppt_filename = '{}.{}'.format(ppt_filename,'pptx')
+        ppt_file = pptx.Presentation(ppt_filename)
+
+
+        # cwd = os.getcwd()
+        # print(cwd)
+        # AI_Path = cwd.split('\D_build_report')[0]
+        # print(AI_Path)
+        # total_folder_path_new = pred_mask_folder_path.split('/')
+
+        # label_mask_folder_path= AI_Path + '/C_pred/compare_output/' + total_folder_path_new[len(total_folder_path_new)-1]
+        #label_mask_folder_path= AI_Path + '/C_pred/compare_output/' + pred_mask_folder_path #停用 modify by charley
+        label_mask_folder_path= self.compare_img_folder_path1 + '/' + pred_mask_folder_path #停用 add by charley 0831
+        print("label_mask_folder_path: ")
+        print(label_mask_folder_path)
+        # label_mask_folder_path='F:/SurgeryAnalytics/AI_Cases/Dentistry/2_Linknet_efficientnetb7_0_5/C_pred/compare_output/pred-Linknet_efficientnetb7_n41'
+
+        # label_mask_folder_path=pred_mask_folder_path
+        pic_files = [fn for fn in os.listdir(label_mask_folder_path) if fn.endswith('.png')]
+        # print(pic_files)
+        file_name_list = [os.path.splitext(x)[0] for x in os.listdir(label_mask_folder_path)]
+
+        file_name_list = [os.path.splitext(x)[0] for x in os.listdir(label_mask_folder_path)]
+
+        # fnp=label_mask_folder_path+'/'+file_name_list[0]+'.png'
+        
+        #就是排除ipynb_checkpoints 進入清單 1110914
+        if '.ipynb_checkpoints' in file_name_list:
+            file_name_list.remove('.ipynb_checkpoints')
+
+
+        for i in range(0,len(file_name_list),4):
+
+            slide = ppt_file.slides.add_slide(ppt_file.slide_layouts[1])
+            # title = slide.shapes.title
+            # slide.shapes.title.top = 0
+            # slide.shapes.title.left = 0
+            # # slide.shapes.title.height = 1
+            # title.text = file_name_list[i] + "~" + str(i+3)
+            textbox = slide.shapes.add_textbox(left=Inches(0.5), top=Inches(0.25), width=(5), height=Inches(1.5))  # left，top爲相對位置，width，height爲文本框大小
+            textbox.text = "清單順序" + str(i+1) + "~" + str(i+4)
+
+            img_path1=label_mask_folder_path+'/'+file_name_list[i]+'.png'
+            pic = slide.shapes.add_picture(img_path1, left=Inches(0), top=Inches(1.5), height=Inches(1.5))
+
+            # img_path2=label_mask_folder_path+'/'+file_name_list[i+1]+'.png'
+            # pic = slide.shapes.add_picture(img_path2, left=Inches(0), top=Inches(3), height=Inches(1.5))
+
+            # img_path3=label_mask_folder_path+'/'+file_name_list[i+2]+'.png'
+            # pic = slide.shapes.add_picture(img_path3, left=Inches(0), top=Inches(4.5), height=Inches(1.5))
+
+            # img_path4=label_mask_folder_path+'/'+file_name_list[i+3]+'.png'
+            # pic = slide.shapes.add_picture(img_path4, left=Inches(0), top=Inches(6), height=Inches(1.5))   
+            try:
+                img_path4=label_mask_folder_path+'/'+file_name_list[i+3]+'.png'
+                pic = slide.shapes.add_picture(img_path4, left=Inches(0), top=Inches(6), height=Inches(1.5)) 
+                img_path3=label_mask_folder_path+'/'+file_name_list[i+2]+'.png'
+                pic = slide.shapes.add_picture(img_path3, left=Inches(0), top=Inches(4.5), height=Inches(1.5))
+                img_path2=label_mask_folder_path+'/'+file_name_list[i+1]+'.png'
+                pic = slide.shapes.add_picture(img_path2, left=Inches(0), top=Inches(3), height=Inches(1.5))
+            except:
+                try:
+                    img_path3=label_mask_folder_path+'/'+file_name_list[i+2]+'.png'
+                    pic = slide.shapes.add_picture(img_path3, left=Inches(0), top=Inches(4.5), height=Inches(1.5))
+                    img_path2=label_mask_folder_path+'/'+file_name_list[i+1]+'.png'
+                    pic = slide.shapes.add_picture(img_path2, left=Inches(0), top=Inches(3), height=Inches(1.5))
+                except:
+                    try:
+                        img_path2=label_mask_folder_path+'/'+file_name_list[i+1]+'.png'
+                        pic = slide.shapes.add_picture(img_path2, left=Inches(0), top=Inches(3), height=Inches(1.5))
+                    except:
+                        textbox = slide.shapes.add_textbox(left=Inches(0.5), top=Inches(6), width=(5), height=Inches(1.5))  # left，top爲相對位置，width，height爲文本框大小
+                        textbox.text = "全部圖片已完成"
+            
+            if i+4>=len(file_name_list):
+                textbox.text=textbox.text + "_報告資料以至結尾"
+            
+        ppt_file.save(ppt_filename)
+
+    # print(ten2TwentySix(50))
+    def run(self):
+        for idx in range(len(self.predRootFolderList)):
+            predFolderName = self.predRootFolderList[idx]
+            saveExcelName = self.saveNameList[idx]
+            # print(saveExcelName)
+            predFolderPath = os.path.join(self.predRootFolderPath, predFolderName)
+            saveExcelPath = os.path.join(self.predRootFolderPath, saveExcelName)
+            # print(saveExcelPath)
+            self.compare_output_ppt(predFolderName,saveExcelPath)
+            rowCount = 0
+            print("Building {} report ...  ".format(predFolderName), end = '')
+            print(self.config)
+
+            self.initial_count = 0
+            # dir = "RandomDirectory"
+            for path in os.listdir(self.trueLabelFolderPath):
+                if os.path.isfile(os.path.join(self.trueLabelFolderPath, path)):
+                    self.initial_count += 1
+            print(self.initial_count)
+
+
+
+
+            for file in os.listdir(self.trueLabelFolderPath):
+                tmpRowIoU, tmpRowCount = self.calImgAccuracy(predFolderPath, file)
+                excelalgo=self.SummaryNames(rowCount,file)
+                self.dfIoU.loc[rowCount] = tmpRowIoU
+                self.dfCount.loc[rowCount] = tmpRowCount
+                self.dfSummary.loc[rowCount] = excelalgo
+                rowCount += 1
+                if (((rowCount/self.initial_count)*100)%10) == 0:                                                         #20230505-yita-改%---------------
+                    print("處理進度DataNum:" + str(((rowCount/self.initial_count)*100))+"%" )                              #20230505-yita-改%-------------               
+
+            self.SummaryOtherData(rowCount)
+            
+            # columns = [['A', 'A', 'B', 'B', 'C'], ['a', 'b', 'c', 'd', 'e']]# 創建形狀為（10，5） 的DataFrame 並設置二級標題
+            # demo_df = pd.DataFrame(np.arange(50).reshape(10, 5), columns=columns)
+            # print(demo_df)
+            # self.style_df = self.style_color(demo_df, {"A": '#1C1C1C', "B": '#00EEEE', "C": '#1A1A1A'})
+            
+            self.dfIoU.replace('None', np.nan, inplace=True)
+            self.dfCount.replace('None', np.nan, inplace=True)
+            
+            with pd.ExcelWriter(saveExcelPath) as writer:
+                self.dfSummary.to_excel(writer, sheet_name='Summary', index=False)
+                self.dfIoU.to_excel(writer, sheet_name='IoU_Details', index=False)
+                self.dfCount.to_excel(writer, sheet_name='Count_Details', index=False)
+                # self.style_df.to_excel(writer, sheet_name='sheet_name')
+            self.correct_label_color(saveExcelPath)
+            
+            
+            
+            
+            
+            
+        print("Done!")
+        print(self.JasonPath)
+        #--------------------------new20221108-yita----------------
+        # import shutil
+        # src = 'old.txt'
+        # dst = 'new.txt'
+        # shutil.copyfile(src, dst)
+        # basename = os.path.basename(filepath)
+        save_data_folder_path= self.config["save_pred_img_folder_path"]
+        # best_ckpt_Folder= self.config["save_ckpt_Folder"] + "/" + self.config["model"] + "_" + self.config["BACKBONE"] + "_" + self.config["ckptname"] + "_" + self.config["ckptnameVal"] + "_model.pth"
+        best_ckpt_Folder= self.config["save_ckpt_Folder"] + "/" + self.config["model"] + "_" + self.config["BACKBONE"] + "_" + self.config["ckptname"] + "_" + self.config["ckptnameVal"] + "_model.h5"
+        save_best_ckpt_Folder=save_data_folder_path + "/" + os.path.basename(best_ckpt_Folder)
+        shutil.copyfile(best_ckpt_Folder, save_best_ckpt_Folder)
+        Data_total_excel= self.config["Data_total_excel"]
+        save_Data_total_excel=save_data_folder_path + "/" + os.path.basename(Data_total_excel)
+        shutil.copyfile(Data_total_excel, save_Data_total_excel)
+        surgeryName=self.config["surgeryName"]
+        # config_Folder=os.path.split(Data_total_excel)[0] + "/" +  surgeryName + '_config.json'  #1120406 charley
+        # save_config_Folder=save_data_folder_path + "/" + os.path.basename(config_Folder)
+        # shutil.copyfile(config_Folder, save_config_Folder)        
+        #--------------------------new20221108-yita----------------
+    
+        config_Folder=self.JasonPath
+        # # print(config_Folder)
+        save_config_Folder=save_data_folder_path + "/" + os.path.basename(config_Folder)      
+        shutil.copyfile(config_Folder, save_config_Folder)
+        
+        #--------------------------new20230118-charley----------------
+      
+     
